@@ -1,0 +1,204 @@
+#!/usr/bin/env node
+// -*- mode: js; -*-
+const child_process   = require( 'child_process' );
+const spawn           = child_process.spawn;
+const fs              = require( 'fs' );
+const path            = require( 'path' );
+const url             = require( 'url' );
+
+const find            = require( 'find' );
+const mkdirp          = require( 'mkdirp' );
+const minimist        = require( 'minimist' );
+
+const expandPath      = require( '../lib/expand_path' );
+const PackageResolver = require( '../lib/package_resolver' );
+
+const gasketConfig    = require( expandPath( '~/.gasket.json' ) );
+
+main( minimist( process.argv.slice( 2 ) ) );
+
+function main(argv) {
+    // console.dir( argv );
+
+    if ( argv._.length == 0 ) {
+        if ( argv.h || argv.help ) {
+            printUsage();
+
+            return ;
+        }
+    }
+
+    switch ( argv._[0] ) {
+    case 'install':
+        install( argv );
+        break;
+
+    case 'search':
+        search( argv );
+        break;
+
+    case 'update':
+        update( argv );
+        break;
+    }
+}
+
+function printUsage() {
+    let program_name = path.basename( process.argv[1] );
+    let usage = [
+        'Usage: ',
+        `    ${program_name} -h/--help`,
+        `    ${program_name} -v/--version`,
+        `    ${program_name} <command> [arguments ...] [options ...]`,
+        ''
+    ];
+    
+    console.log( usage.join( '\n' ) );
+}
+
+function install(argv) {
+    function performCurl(command, args, closeAfter) {
+        const curl = spawn( command, args );
+
+        // curl.stdout.on( 'data', (data) => { process.stdout.write( `${data}\n` ); } );
+        // curl.stderr.on( 'data', (data) => { process.stderr.write( `${data}\n` ); } );
+
+        curl.on( 'close', closeAfter );
+    }
+
+    function performGitClone(command, args, closeAfter) {
+        const git = spawn( command, args );
+
+        // git.stdout.on( 'data', (data) => { process.stdout.write( `${data}\n` ); } );
+        // git.stderr.on( 'data', (data) => { process.stderr.write( `${data}\n` ); } );
+
+        git.on( 'close', closeAfter );
+    }
+
+    function performCopy(src, dest) {
+        const cp = spawn( 'cp', [ src, dest ] );
+    }
+
+    function clone(base_path, pkg) {
+        console.log( '#  base_path: %s, pkg: %j', base_path, pkg );
+        
+        let target_path = path.join( base_path, pkg.name );
+
+        function closeAfter(code) {
+            console.log( `# => ${code}` );
+
+            let emacs_lisp_package_base_path = expandPath( gasketConfig.emacs_lisp_package_path );
+            let to_package_path              = path.join( emacs_lisp_package_base_path, pkg.name );
+
+            console.log( '' );
+            console.log( `### copy into ${to_package_path}` );
+
+            if ( !fs.existsSync( to_package_path ) ) {
+                mkdirp.sync( to_package_path );
+                console.log( `mkdir -p ${to_package_path}` );
+            }
+
+            if ( fs.existsSync( target_path ) ) {
+                console.log( 'target_path: %s', target_path );
+                find.file( /\.el$/, target_path, (files) => {
+                    files.forEach( (filepath) => {
+                        let dirpath     = path.dirname( path.relative( target_path, filepath ) );
+                        let filename    = path.basename( filepath );
+
+                        let to_filepath = path.join( to_package_path, dirpath );
+                        if ( !fs.existsSync( to_filepath ) ) {
+                            mkdirp.sync( to_filepath );
+                            console.log( `mkdir -p ${to_filepath}` );
+                        }
+
+                        performCopy( filepath, to_filepath );
+                        console.log( `cp ${filepath} ${to_filepath}` );
+                    } );
+                    console.log( '' );
+                } );
+            }
+        }
+
+        if ( pkg.url !== null || pkg.url !== undefined ) {
+            let a_url = url.parse( pkg.url );
+
+            let command = '';
+            let args    = null;
+
+            if ( a_url.path.endsWith( '.git' ) ) {
+                command = 'git';
+                args    = [ 'clone', pkg.url, target_path ];
+            } else {
+                let package_to_path = path.join( target_path, path.basename( a_url.path ) );
+
+                if ( !fs.existsSync( target_path ) ) {
+                    mkdirp.sync( target_path );
+                    console.log( `mkdir -p ${target_path}` );
+                }
+                
+                command = 'curl';
+                args    = [ pkg.url, '-#', '-o', package_to_path ];
+            }
+
+            console.log( '# ' );
+            console.log( '%s %s', command, args.join( ' ' ) );
+
+            if ( command == 'git' ) {
+                performGitClone( command, args, closeAfter );
+            } else {
+                performCurl( command, args, closeAfter );
+            }
+        }
+    }
+
+    // console.log( '# process.argv: %j', process.argv );
+
+    if ( argv._.length > 1 ) {
+        let package_name = argv._[1];
+
+        console.log( '# package_name: %j', package_name );
+
+        let base_path = expandPath( '~/.gasket/packages/' );
+        if ( !fs.existsSync( base_path ) ) {
+            fs.mkdirSync( base_path );
+        }
+
+        // console.log( '# ' );
+
+        let pkg = PackageResolver.namedAtPackage( package_name );
+        if ( pkg ) {
+            // console.log( '# ' );
+            // console.log( '# ---' );
+
+            clone( base_path, pkg );
+
+            pkg.depends.forEach( (depend) => {
+                // console.log( '# ---' );
+
+                clone( base_path, depend );
+
+                // console.log( '#' );
+            } );
+
+        } else {
+            console.log( `# ${package_name} not found` );
+        }
+    }
+}
+
+function search(argv) {
+    let found_pkgs;
+    if ( argv._.length > 1 ) {
+        let phrase = argv._[1];
+
+        found_pkgs = PackageResolver.searchPackage( phrase );
+        
+    } else {
+        found_pkgs = PackageResolver.allPackage();
+    }
+
+    for ( let pkg of found_pkgs ) {
+        console.log( `${pkg.name} ${pkg.version}` );
+        console.log( `    ${pkg.description}` );
+    }
+}
